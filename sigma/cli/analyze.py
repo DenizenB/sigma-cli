@@ -1,10 +1,15 @@
 import json
 import pathlib
+from collections import defaultdict
+from typing import Union, Dict
+
 import click
 
 from sigma.cli.rules import load_rules
 from sigma.analyze.attack import score_functions, calculate_attack_scores
 from sigma.data.mitre_attack import mitre_attack_techniques_tactics_mapping, mitre_attack_version
+from sigma.modifiers import SigmaStartswithModifier, SigmaEndswithModifier, SigmaContainsModifier
+from sigma.rule import SigmaDetection, SigmaDetectionItem
 
 @click.group(name="analyze", help="Analyze Sigma rule sets")
 def analyze_group():
@@ -105,3 +110,65 @@ def analyze_attack(file_pattern, subtechniques, max_color, min_color, max_score,
         "techniques": layer_techniques,
     }
     json.dump(layer, output, indent=2)
+
+@analyze_group.command(
+        name="fields",
+        help="Analyze field usage in Sigma rule set."
+    )
+@click.option(
+    "--file-pattern", "-P",
+    default="*.yml",
+    show_default=True,
+    help="Pattern for file names to be included in recursion into directories.",
+)
+@click.argument(
+    "output",
+    type=click.File("w"),
+)
+@click.argument(
+    "input",
+    nargs=-1,
+    required=True,
+    type=click.Path(exists=True, allow_dash=True, path_type=pathlib.Path),
+)
+def analyze_fields(file_pattern, output, input):
+    rules = load_rules(input, file_pattern)
+
+    rules_by_field = defaultdict(int)
+    conditions_by_field = defaultdict(int)
+
+    for rule in rules:
+        observed_fields = set()
+
+        for detection in rule.detection.detections.values():
+            for field, count in get_conditions_by_field(detection):
+                conditions_by_field[field] += count
+                observed_fields.add(field)
+
+        for field in observed_fields:
+            rules_by_field[field] += 1
+
+    layer = {
+        'rules_by_field': dict(sorted(rules_by_field.items(), key=lambda i: i[1], reverse=True)),
+        'conditions_by_field': dict(sorted(conditions_by_field.items(), key=lambda i: i[1], reverse=True)),
+    }
+
+    json.dump(layer, output, indent=2)
+
+def get_conditions_by_field(detection: Union[SigmaDetection, SigmaDetectionItem]) -> Dict[str, int]:
+    modifier_to_keyword = {
+        SigmaStartswithModifier: "|startswith",
+        SigmaEndswithModifier: "|endswith",
+        SigmaContainsModifier: "|contains",
+    }
+    if type(detection) == SigmaDetectionItem:
+        field = detection.field or "__keywords__"
+
+        for modifier in detection.modifiers:
+            field += modifier_to_keyword.get(modifier, "")
+
+        yield field, len(detection.value)
+
+    elif type(detection) == SigmaDetection:
+        for item in detection.detection_items:
+            yield from get_conditions_by_field(item)
