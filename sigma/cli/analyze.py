@@ -122,9 +122,19 @@ def analyze_attack(file_pattern, subtechniques, max_color, min_color, max_score,
     help="Pattern for file names to be included in recursion into directories.",
 )
 @click.option(
-    "--modifiers",
+    "--modifiers/--no-modifiers",
     default=False,
-    help="Group by both field and modifier?"
+    help="Group by modifiers in addition to fields?"
+)
+@click.option(
+    "--combined/--no-combined",
+    default=False,
+    help="Combine all fields required for a rule"
+)
+@click.option(
+    "--verbose/--no-verbose",
+    default=False,
+    help="List rule names instead of showing counts"
 )
 @click.argument(
     "output",
@@ -136,29 +146,55 @@ def analyze_attack(file_pattern, subtechniques, max_color, min_color, max_score,
     required=True,
     type=click.Path(exists=True, allow_dash=True, path_type=pathlib.Path),
 )
-def analyze_fields(modifiers, file_pattern, output, input):
+def analyze_fields(modifiers, combined, verbose, file_pattern, output, input):
     rules = load_rules(input, file_pattern)
 
-    rules_by_field = defaultdict(int)
-    conditions_by_field = defaultdict(int)
+    if verbose:
+        rules_by_field = defaultdict(set)
+        conditions_by_field = defaultdict(set)
+    else:
+        rules_by_field = defaultdict(int)
+        conditions_by_field = defaultdict(int)
 
     for rule in rules:
         observed_fields = set()
 
         for detection in rule.detection.detections.values():
             for field, count in get_conditions_by_field(detection, modifiers):
-                conditions_by_field[field] += count
                 observed_fields.add(field)
 
-        for field in observed_fields:
-            rules_by_field[field] += 1
+                if verbose:
+                    conditions_by_field[field].add(rule.title)
+                else:
+                    conditions_by_field[field] += count
+
+        if combined:
+            fields = ",".join(sorted(observed_fields))
+
+            if verbose:
+                rules_by_field[fields].add(rule.title)
+            else:
+                rules_by_field[fields] += 1
+        else:
+            for field in observed_fields:
+                if verbose:
+                    rules_by_field[field].add(rule.title)
+                else:
+                    rules_by_field[field] += 1
+
+    if verbose:
+        key = lambda v: len(v[1])
+    else:
+        key = lambda v: v[1]
 
     layer = {
-        'rules_by_field': dict(sorted(rules_by_field.items(), key=lambda i: i[1], reverse=True)),
-        'conditions_by_field': dict(sorted(conditions_by_field.items(), key=lambda i: i[1], reverse=True)),
+        'rules_by_field': dict(sorted(rules_by_field.items(), key=key, reverse=True)),
     }
 
-    json.dump(layer, output, indent=2)
+    if not combined:
+        layer['conditions_by_field'] = dict(sorted(conditions_by_field.items(), key=key, reverse=True))
+
+    json.dump(layer, output, indent=2, default=lambda v: list(sorted(v)))
 
 def get_conditions_by_field(detection: Union[SigmaDetection, SigmaDetectionItem], modifiers : bool) -> Dict[str, int]:
     modifier_to_keyword = {
