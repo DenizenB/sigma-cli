@@ -1,14 +1,14 @@
 import json
 import pathlib
 from collections import defaultdict
-from typing import Union, Dict
+from typing import Union, Dict, Iterator
 
 import click
 
 from sigma.cli.rules import load_rules
 from sigma.analyze.attack import score_functions, calculate_attack_scores
 from sigma.data.mitre_attack import mitre_attack_techniques_tactics_mapping, mitre_attack_version
-from sigma.modifiers import SigmaStartswithModifier, SigmaEndswithModifier, SigmaContainsModifier
+from sigma.modifiers import *
 from sigma.rule import SigmaDetection, SigmaDetectionItem
 
 @click.group(name="analyze", help="Analyze Sigma rule sets")
@@ -121,6 +121,11 @@ def analyze_attack(file_pattern, subtechniques, max_color, min_color, max_score,
     show_default=True,
     help="Pattern for file names to be included in recursion into directories.",
 )
+@click.option(
+    "--modifiers",
+    default=False,
+    help="Group by both field and modifier?"
+)
 @click.argument(
     "output",
     type=click.File("w"),
@@ -131,7 +136,7 @@ def analyze_attack(file_pattern, subtechniques, max_color, min_color, max_score,
     required=True,
     type=click.Path(exists=True, allow_dash=True, path_type=pathlib.Path),
 )
-def analyze_fields(file_pattern, output, input):
+def analyze_fields(modifiers, file_pattern, output, input):
     rules = load_rules(input, file_pattern)
 
     rules_by_field = defaultdict(int)
@@ -141,7 +146,7 @@ def analyze_fields(file_pattern, output, input):
         observed_fields = set()
 
         for detection in rule.detection.detections.values():
-            for field, count in get_conditions_by_field(detection):
+            for field, count in get_conditions_by_field(detection, modifiers):
                 conditions_by_field[field] += count
                 observed_fields.add(field)
 
@@ -155,20 +160,75 @@ def analyze_fields(file_pattern, output, input):
 
     json.dump(layer, output, indent=2)
 
-def get_conditions_by_field(detection: Union[SigmaDetection, SigmaDetectionItem]) -> Dict[str, int]:
+def get_conditions_by_field(detection: Union[SigmaDetection, SigmaDetectionItem], modifiers : bool) -> Dict[str, int]:
     modifier_to_keyword = {
         SigmaStartswithModifier: "|startswith",
         SigmaEndswithModifier: "|endswith",
         SigmaContainsModifier: "|contains",
+        SigmaBase64OffsetModifier: "|base64offset",
+        SigmaBase64Modifier: "|base64",
     }
     if type(detection) == SigmaDetectionItem:
         field = detection.field or "__keywords__"
 
-        for modifier in detection.modifiers:
-            field += modifier_to_keyword.get(modifier, "")
+        if modifiers:
+            for modifier in detection.modifiers:
+                field += modifier_to_keyword.get(modifier, "")
 
         yield field, len(detection.value)
 
     elif type(detection) == SigmaDetection:
         for item in detection.detection_items:
-            yield from get_conditions_by_field(item)
+            yield from get_conditions_by_field(item, modifiers)
+
+
+@analyze_group.command(
+        name="categories",
+        help="Analyze EventIDs for each category in Sigma rule set."
+    )
+@click.option(
+    "--file-pattern", "-P",
+    default="*.yml",
+    show_default=True,
+    help="Pattern for file names to be included in recursion into directories.",
+)
+@click.argument(
+    "output",
+    type=click.File("w"),
+)
+@click.argument(
+    "input",
+    nargs=-1,
+    required=True,
+    type=click.Path(exists=True, allow_dash=True, path_type=pathlib.Path),
+)
+def analyze_categories(file_pattern, output, input):
+    rules = load_rules(input, file_pattern)
+
+    events_by_category = defaultdict(lambda: defaultdict(int))
+
+    for rule in rules:
+        category = rule.logsource.category or "unknown"
+
+        for detection in rule.detection.detections.values():
+            for event_id in get_event_ids(detection):
+                events_by_category[category][event_id] += 1
+
+    layer = {
+        'events_by_category': {
+            category: dict(sorted(count_by_event.items(), key=lambda i: i[1], reverse=True))
+                for category, count_by_event in events_by_category.items()
+        },
+    }
+
+    json.dump(layer, output, indent=2)
+
+def get_event_ids(detection: Union[SigmaDetection, SigmaDetectionItem]) -> Iterator[str]:
+    if type(detection) == SigmaDetectionItem:
+        if detection.field and detection.field.lower() in ("eventid", "event_id"):
+            for value in detection.value:
+                yield str(value)
+
+    elif type(detection) == SigmaDetection:
+        for item in detection.detection_items:
+            yield from get_event_ids(item)
