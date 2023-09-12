@@ -1,7 +1,7 @@
 import json
 import pathlib
 from collections import defaultdict
-from typing import Union, Dict, Iterator
+from typing import Union, Dict, Iterator, List
 
 import click
 
@@ -149,54 +149,40 @@ def analyze_attack(file_pattern, subtechniques, max_color, min_color, max_score,
 def analyze_fields(modifiers, combined, verbose, file_pattern, output, input):
     rules = load_rules(input, file_pattern)
 
-    if verbose:
-        rules_by_field = defaultdict(set)
-        conditions_by_field = defaultdict(set)
-    else:
-        rules_by_field = defaultdict(int)
-        conditions_by_field = defaultdict(int)
+    rules_by_field = defaultdict(set)
+    conditions_by_field = defaultdict(list)
 
     for rule in rules:
         observed_fields = set()
 
         for detection in rule.detection.detections.values():
-            for field, count in get_conditions_by_field(detection, modifiers):
+            for field, values in get_conditions_by_field(detection, modifiers):
                 observed_fields.add(field)
-
-                if verbose:
-                    conditions_by_field[field].add(rule.title)
-                else:
-                    conditions_by_field[field] += count
+                conditions_by_field[field].extend(values)
 
         if combined:
             fields = ",".join(sorted(observed_fields))
-
-            if verbose:
-                rules_by_field[fields].add(rule.title)
-            else:
-                rules_by_field[fields] += 1
+            rules_by_field[fields].add(rule.title)
         else:
             for field in observed_fields:
-                if verbose:
-                    rules_by_field[field].add(rule.title)
-                else:
-                    rules_by_field[field] += 1
+                rules_by_field[field].add(rule.title)
+
+    layer = {}
 
     if verbose:
-        key = lambda v: len(v[1])
+        layer['rules_by_field'] = dict(sorted(rules_by_field.items(), key=lambda v: len(v[1]), reverse=True))
     else:
-        key = lambda v: v[1]
-
-    layer = {
-        'rules_by_field': dict(sorted(rules_by_field.items(), key=key, reverse=True)),
-    }
+        layer['rules_by_field'] = dict(sorted(((field, len(rules)) for field, rules in rules_by_field.items()), key=lambda v: v[1], reverse=True))
 
     if not combined:
-        layer['conditions_by_field'] = dict(sorted(conditions_by_field.items(), key=key, reverse=True))
+        if verbose:
+            layer['conditions_by_field'] = dict(sorted(conditions_by_field.items(), key=lambda v: len(v[1]), reverse=True))
+        else:
+            layer['conditions_by_field'] = dict(sorted(((field, len(values)) for field, values in conditions_by_field.items()), key=lambda v: v[1], reverse=True))
 
     json.dump(layer, output, indent=2, default=lambda v: list(sorted(v)))
 
-def get_conditions_by_field(detection: Union[SigmaDetection, SigmaDetectionItem], modifiers : bool) -> Dict[str, int]:
+def get_conditions_by_field(detection: Union[SigmaDetection, SigmaDetectionItem], modifiers : bool) -> Dict[str, List[str]]:
     modifier_to_keyword = {
         SigmaStartswithModifier: "|startswith",
         SigmaEndswithModifier: "|endswith",
@@ -211,7 +197,7 @@ def get_conditions_by_field(detection: Union[SigmaDetection, SigmaDetectionItem]
             for modifier in detection.modifiers:
                 field += modifier_to_keyword.get(modifier, "")
 
-        yield field, len(detection.value)
+        yield field, [str(v) for v in detection.value]
 
     elif type(detection) == SigmaDetection:
         for item in detection.detection_items:
